@@ -1,7 +1,0 @@
-0
-565231 217960589 1771937090000000000 6739d174234aea9a28c05d62bbc3ae4d 0 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sqlite3.h
-899 273990497 1776106215000000000 9171157f92533dccf625196b070a29bb 1 compiler/aro/include/stdarg.h
-14940 217960376 1771707923000000000 4ec834e4a95cf98ab2fd87a0c039787f 0 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/os/availability.h
-68399 217956971 1771707923000000000 9d0996f3db85dd2426e8666cc3dfcd91 0 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/AvailabilityInternal.h
-31882 217956977 1771707923000000000 b66e18fcccddd5ffa114a8d9d4d58097 0 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/AvailabilityVersions.h
-414416 217956973 1771707923000000000 84d38cff731c4e6029d4064f3ad7a8f0 0 /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/AvailabilityInternalLegacy.h
