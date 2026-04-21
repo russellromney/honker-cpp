@@ -12,8 +12,9 @@ C++17 binding for [honker](https://honker.dev) — durable queues, streams, pub/
 
 - Zig 0.16+
 - C++17 compiler
-- SQLite 3.9+ with extension loading enabled (on macOS use Homebrew's `sqlite3`; Apple's system build omits `load_extension`)
 - The honker extension (`libhonker_ext.dylib` or `.so`)
+
+SQLite is vendored (see `vendor/sqlite3/`) — no external SQLite dependency needed.
 
 ## Quick start
 

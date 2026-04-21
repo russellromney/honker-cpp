@@ -9,12 +9,21 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const is_darwin = target.result.os.tag == .macos;
-    if (is_darwin) {
-        honker_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite3/include" });
-        honker_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite3/lib" });
-    }
-    honker_mod.linkSystemLibrary("sqlite3", .{});
+
+    honker_mod.addCSourceFile(.{
+        .file = b.path("vendor/sqlite3/sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_ENABLE_LOAD_EXTENSION=1",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_ENABLE_COLUMN_METADATA=1",
+            "-DSQLITE_DEFAULT_MEMSTATUS=0",
+            "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+            "-DHAVE_USLEEP=1",
+            "-DSQLITE_OMIT_DEPRECATED=1",
+            "-w",
+        },
+    });
+    honker_mod.addIncludePath(b.path("vendor/sqlite3"));
     honker_mod.link_libc = true;
 
     const lib = b.addLibrary(.{
@@ -43,13 +52,9 @@ pub fn build(b: *std.Build) void {
             .flags = &.{"-std=c++17", "-Wall", "-Wextra"},
         });
         mod.addIncludePath(b.path("include"));
-        if (is_darwin) {
-            mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite3/include" });
-            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite3/lib" });
-        }
+        mod.addIncludePath(b.path("vendor/sqlite3"));
         mod.link_libc = true;
         mod.link_libcpp = true;
-        mod.linkSystemLibrary("sqlite3", .{});
         mod.linkLibrary(lib);
 
         const exe = b.addExecutable(.{
