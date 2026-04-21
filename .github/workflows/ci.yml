@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout main honker
+        uses: actions/checkout@v4
+        with:
+          repository: russellromney/honker
+          path: main
+
+      - name: Prep submodule path
+        run: rm -rf main/packages/honker-cpp
+
+      - name: Checkout honker-cpp PR
+        uses: actions/checkout@v4
+        with:
+          path: main/packages/honker-cpp
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: main
+
+      - name: Build honker extension
+        working-directory: main
+        run: cargo build --release -p honker-extension
+
+      - name: Set extension path (Linux)
+        if: runner.os == 'Linux'
+        run: echo "EXT_PATH=$PWD/main/target/release/libhonker_ext.so" >> $GITHUB_ENV
+
+      - name: Set extension path (macOS)
+        if: runner.os == 'macOS'
+        run: echo "EXT_PATH=$PWD/main/target/release/libhonker_ext.dylib" >> $GITHUB_ENV
+
+      - name: Run tests
+        working-directory: main/packages/honker-cpp
+        run: zig build test -Dhonker-ext=${{ env.EXT_PATH }}
