@@ -941,30 +941,94 @@ inline Subscription Database::listen(std::string_view channel) {
 }
 
 // =====================================================================
-// WAL Watcher (internal)
+// Database commit watcher (internal)
 // =====================================================================
+
+// Platform-specific file identity for the dead-man's switch.
+#if defined(_WIN32)
+inline bool file_identity(const std::string& path, uint64_t& dev, uint64_t& ino) {
+    // Windows: std::filesystem doesn't expose volume serial or file index
+    // cheaply. Best-effort: return zeros so the identity check is a no-op.
+    (void)path;
+    dev = 0;
+    ino = 0;
+    return true;
+}
+#else
+#include <sys/stat.h>
+inline bool file_identity(const std::string& path, uint64_t& dev, uint64_t& ino) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return false;
+    dev = static_cast<uint64_t>(st.st_dev);
+    ino = static_cast<uint64_t>(st.st_ino);
+    return true;
+}
+#endif
 
 inline void Database::start_wal_watcher() {
     if (wal_watcher_active_.exchange(true)) return;
     wal_watcher_ = std::thread([this]() {
-        namespace fs = std::filesystem;
-        const auto wal_path = fs::path(path_).concat("-wal");
-        std::error_code ec;
-        auto last_size = fs::file_size(wal_path, ec);
-        auto last_time = fs::last_write_time(wal_path, ec);
+        uint64_t init_dev = 0, init_ino = 0;
+        file_identity(path_, init_dev, init_ino);
 
+        // Seed initial data_version.
+        uint32_t last_version = 0;
+        auto query_dv = [this](uint32_t& out) -> bool {
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, "PRAGMA data_version", -1, &stmt, nullptr) != SQLITE_OK)
+                return false;
+            bool ok = false;
+            if (sqlite3_step(stmt) == SQLITE_ROW) {
+                out = static_cast<uint32_t>(sqlite3_column_int(stmt, 0));
+                ok = true;
+            }
+            sqlite3_finalize(stmt);
+            return ok;
+        };
+        query_dv(last_version);
+
+        uint64_t tick = 0;
         while (wal_watcher_active_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            auto size = fs::file_size(wal_path, ec);
-            auto time = fs::last_write_time(wal_path, ec);
-            if (!ec && (size != last_size || time != last_time)) {
-                last_size = size;
-                last_time = time;
+
+            // Path 1: PRAGMA data_version (fast path)
+            uint32_t version = 0;
+            if (query_dv(version)) {
+                if (version != last_version) {
+                    last_version = version;
+                    {
+                        std::lock_guard<std::mutex> lk(wal_mtx_);
+                        wal_changed_ = true;
+                    }
+                    wal_cv_.notify_all();
+                }
+            } else {
+                // Transient failure — force conservative wake
                 {
                     std::lock_guard<std::mutex> lk(wal_mtx_);
                     wal_changed_ = true;
                 }
                 wal_cv_.notify_all();
+            }
+
+            // Path 2: stat identity check (dead-man's switch)
+            if (++tick % 100 == 0) {
+                uint64_t dev = 0, ino = 0;
+                if (!file_identity(path_, dev, ino)) {
+                    // File vanished — force wake, let caller recover
+                    {
+                        std::lock_guard<std::mutex> lk(wal_mtx_);
+                        wal_changed_ = true;
+                    }
+                    wal_cv_.notify_all();
+                } else if (dev != init_dev || ino != init_ino) {
+                    throw std::runtime_error(
+                        "honker: database file replaced (dev=" +
+                        std::to_string(init_dev) + "->" + std::to_string(dev) +
+                        ", ino=" + std::to_string(init_ino) + "->" + std::to_string(ino) +
+                        ") at " + path_ + ". Restart required."
+                    );
+                }
             }
         }
     });
