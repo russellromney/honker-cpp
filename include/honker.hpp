@@ -142,10 +142,10 @@ public:
 
     Database(Database&& other) noexcept
         : db_(other.db_), path_(std::move(other.path_)),
-          wal_watcher_(std::move(other.wal_watcher_)),
-          wal_watcher_active_(other.wal_watcher_active_.load()) {
+          update_watcher_(std::move(other.update_watcher_)),
+          update_watcher_active_(other.update_watcher_active_.load()) {
         other.db_ = nullptr;
-        other.wal_watcher_active_ = false;
+        other.update_watcher_active_ = false;
     }
 
     Database& operator=(Database&& other) noexcept {
@@ -153,10 +153,10 @@ public:
             close();
             db_ = other.db_;
             path_ = std::move(other.path_);
-            wal_watcher_ = std::move(other.wal_watcher_);
-            wal_watcher_active_ = other.wal_watcher_active_.load();
+            update_watcher_ = std::move(other.update_watcher_);
+            update_watcher_active_ = other.update_watcher_active_.load();
             other.db_ = nullptr;
-            other.wal_watcher_active_ = false;
+            other.update_watcher_active_ = false;
         }
         return *this;
     }
@@ -189,15 +189,15 @@ public:
     sqlite3* raw() const noexcept { return db_; }
     const std::string& path() const noexcept { return path_; }
 
-    // Internal: start/stop WAL watcher thread for stream subscriptions.
-    void start_wal_watcher();
-    void stop_wal_watcher();
-    void wait_wal_change(std::chrono::milliseconds timeout);
+    // Internal: start/stop update watcher thread for stream subscriptions.
+    void start_update_watcher();
+    void stop_update_watcher();
+    void wait_update(std::chrono::milliseconds timeout);
 
 private:
     void close() {
         if (db_) {
-            stop_wal_watcher();
+            stop_update_watcher();
             honker_cpp_close(db_);
             db_ = nullptr;
         }
@@ -205,11 +205,11 @@ private:
 
     sqlite3* db_ = nullptr;
     std::string path_;
-    std::thread wal_watcher_;
-    std::atomic<bool> wal_watcher_active_{false};
-    std::mutex wal_mtx_;
-    std::condition_variable wal_cv_;
-    bool wal_changed_ = false;
+    std::thread update_watcher_;
+    std::atomic<bool> update_watcher_active_{false};
+    std::mutex update_mtx_;
+    std::condition_variable update_cv_;
+    bool update_changed_ = false;
 };
 
 // =====================================================================
@@ -965,9 +965,9 @@ inline bool file_identity(const std::string& path, uint64_t& dev, uint64_t& ino)
 }
 #endif
 
-inline void Database::start_wal_watcher() {
-    if (wal_watcher_active_.exchange(true)) return;
-    wal_watcher_ = std::thread([this]() {
+inline void Database::start_update_watcher() {
+    if (update_watcher_active_.exchange(true)) return;
+    update_watcher_ = std::thread([this]() {
         uint64_t init_dev = 0, init_ino = 0;
         file_identity(path_, init_dev, init_ino);
 
@@ -988,7 +988,7 @@ inline void Database::start_wal_watcher() {
         query_dv(last_version);
 
         uint64_t tick = 0;
-        while (wal_watcher_active_.load()) {
+        while (update_watcher_active_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
             // Path 1: PRAGMA data_version (fast path)
@@ -997,18 +997,18 @@ inline void Database::start_wal_watcher() {
                 if (version != last_version) {
                     last_version = version;
                     {
-                        std::lock_guard<std::mutex> lk(wal_mtx_);
-                        wal_changed_ = true;
+                        std::lock_guard<std::mutex> lk(update_mtx_);
+                        update_changed_ = true;
                     }
-                    wal_cv_.notify_all();
+                    update_cv_.notify_all();
                 }
             } else {
                 // Transient failure — force conservative wake
                 {
-                    std::lock_guard<std::mutex> lk(wal_mtx_);
-                    wal_changed_ = true;
+                    std::lock_guard<std::mutex> lk(update_mtx_);
+                    update_changed_ = true;
                 }
-                wal_cv_.notify_all();
+                update_cv_.notify_all();
             }
 
             // Path 2: stat identity check (dead-man's switch)
@@ -1017,10 +1017,10 @@ inline void Database::start_wal_watcher() {
                 if (!file_identity(path_, dev, ino)) {
                     // File vanished — force wake, let caller recover
                     {
-                        std::lock_guard<std::mutex> lk(wal_mtx_);
-                        wal_changed_ = true;
+                        std::lock_guard<std::mutex> lk(update_mtx_);
+                        update_changed_ = true;
                     }
-                    wal_cv_.notify_all();
+                    update_cv_.notify_all();
                 } else if (dev != init_dev || ino != init_ino) {
                     throw std::runtime_error(
                         "honker: database file replaced (dev=" +
@@ -1034,16 +1034,16 @@ inline void Database::start_wal_watcher() {
     });
 }
 
-inline void Database::stop_wal_watcher() {
-    if (!wal_watcher_active_.exchange(false)) return;
-    wal_cv_.notify_all();
-    if (wal_watcher_.joinable()) wal_watcher_.join();
+inline void Database::stop_update_watcher() {
+    if (!update_watcher_active_.exchange(false)) return;
+    update_cv_.notify_all();
+    if (update_watcher_.joinable()) update_watcher_.join();
 }
 
-inline void Database::wait_wal_change(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lk(wal_mtx_);
-    wal_cv_.wait_for(lk, timeout, [this]() { return wal_changed_ || !wal_watcher_active_.load(); });
-    wal_changed_ = false;
+inline void Database::wait_update(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(update_mtx_);
+    update_cv_.wait_for(lk, timeout, [this]() { return update_changed_ || !update_watcher_active_.load(); });
+    update_changed_ = false;
 }
 
 // =====================================================================
