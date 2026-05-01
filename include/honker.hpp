@@ -142,10 +142,10 @@ public:
 
     Database(Database&& other) noexcept
         : db_(other.db_), path_(std::move(other.path_)),
-          wal_watcher_(std::move(other.wal_watcher_)),
-          wal_watcher_active_(other.wal_watcher_active_.load()) {
+          update_watcher_(std::move(other.update_watcher_)),
+          update_watcher_active_(other.update_watcher_active_.load()) {
         other.db_ = nullptr;
-        other.wal_watcher_active_ = false;
+        other.update_watcher_active_ = false;
     }
 
     Database& operator=(Database&& other) noexcept {
@@ -153,10 +153,10 @@ public:
             close();
             db_ = other.db_;
             path_ = std::move(other.path_);
-            wal_watcher_ = std::move(other.wal_watcher_);
-            wal_watcher_active_ = other.wal_watcher_active_.load();
+            update_watcher_ = std::move(other.update_watcher_);
+            update_watcher_active_ = other.update_watcher_active_.load();
             other.db_ = nullptr;
-            other.wal_watcher_active_ = false;
+            other.update_watcher_active_ = false;
         }
         return *this;
     }
@@ -189,15 +189,16 @@ public:
     sqlite3* raw() const noexcept { return db_; }
     const std::string& path() const noexcept { return path_; }
 
-    // Internal: start/stop WAL watcher thread for stream subscriptions.
-    void start_wal_watcher();
-    void stop_wal_watcher();
-    void wait_wal_change(std::chrono::milliseconds timeout);
+    // Internal: start/stop update watcher thread for stream subscriptions.
+    void start_update_watcher();
+    void stop_update_watcher();
+    void wait_update(std::chrono::milliseconds timeout);
+    void mark_updated();
 
 private:
     void close() {
         if (db_) {
-            stop_wal_watcher();
+            stop_update_watcher();
             honker_cpp_close(db_);
             db_ = nullptr;
         }
@@ -205,11 +206,11 @@ private:
 
     sqlite3* db_ = nullptr;
     std::string path_;
-    std::thread wal_watcher_;
-    std::atomic<bool> wal_watcher_active_{false};
-    std::mutex wal_mtx_;
-    std::condition_variable wal_cv_;
-    bool wal_changed_ = false;
+    std::thread update_watcher_;
+    std::atomic<bool> update_watcher_active_{false};
+    std::mutex update_mtx_;
+    std::condition_variable update_cv_;
+    bool update_changed_ = false;
 };
 
 // =====================================================================
@@ -645,46 +646,49 @@ private:
 
 class Scheduler {
 public:
-    void add(std::string_view name, std::string_view queue, std::string_view cron_expr,
+    void add(std::string_view name, std::string_view queue, std::string_view schedule_expr,
              std::string_view payload_json, int64_t priority = 0,
              std::optional<int64_t> expires_sec = std::nullopt) {
         const std::string n{name};
         const std::string q{queue};
-        const std::string c{cron_expr};
+        const std::string c{schedule_expr};
         const std::string p{payload_json};
         const auto rc = honker_cpp_scheduler_register(
-            db_, n.c_str(), q.c_str(), c.c_str(), p.c_str(), priority,
+            db_->raw(), n.c_str(), q.c_str(), c.c_str(), p.c_str(), priority,
             expires_sec.value_or(0));
         if (rc < 0) throw Error{"scheduler_register failed: SQL error"};
+        db_->mark_updated();
     }
 
     int64_t remove(std::string_view name) {
         const std::string n{name};
-        const auto rc = honker_cpp_scheduler_unregister(db_, n.c_str());
+        const auto rc = honker_cpp_scheduler_unregister(db_->raw(), n.c_str());
         if (rc < 0) throw Error{"scheduler_unregister failed: SQL error"};
+        db_->mark_updated();
         return rc;
     }
 
     std::vector<ScheduledFire> tick(int64_t now_unix) {
-        char* rows = honker_cpp_scheduler_tick(db_, now_unix);
+        char* rows = honker_cpp_scheduler_tick(db_->raw(), now_unix);
         if (!rows) return {};
         return parse_fires(rows);
     }
 
     int64_t soonest() {
-        return honker_cpp_scheduler_soonest(db_);
+        return honker_cpp_scheduler_soonest(db_->raw());
     }
 
     void run(std::atomic<bool>& stop_token, std::string_view owner) {
         constexpr int64_t LOCK_TTL = 60;
         constexpr auto HEARTBEAT = std::chrono::seconds(20);
         const std::string o{owner};
+        db_->start_update_watcher();
 
         while (!stop_token.load()) {
             auto acquired = honker_cpp_lock_acquire(
-                db_, "honker-scheduler", o.c_str(), LOCK_TTL);
+                db_->raw(), "honker-scheduler", o.c_str(), LOCK_TTL);
             if (acquired <= 0) {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                db_->wait_update(std::chrono::seconds(5));
                 continue;
             }
 
@@ -698,21 +702,37 @@ public:
                 auto now_clock = std::chrono::steady_clock::now();
                 if (now_clock - last_hb >= HEARTBEAT) {
                     auto hb = honker_cpp_lock_heartbeat(
-                        db_, "honker-scheduler", o.c_str(), LOCK_TTL);
+                        db_->raw(), "honker-scheduler", o.c_str(), LOCK_TTL);
                     if (hb <= 0) {
                         // lost leadership
                         break;
                     }
                     last_hb = now_clock;
                 }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+
+                auto wait = HEARTBEAT - (now_clock - last_hb);
+                auto next_fire = soonest();
+                if (next_fire > 0) {
+                    auto fire_tp = std::chrono::system_clock::time_point{
+                        std::chrono::seconds(next_fire)
+                    };
+                    auto until_fire = fire_tp - std::chrono::system_clock::now();
+                    if (until_fire < std::chrono::seconds(0)) {
+                        wait = std::chrono::seconds(0);
+                    } else {
+                        auto until_fire_ms = std::chrono::duration_cast<std::chrono::milliseconds>(until_fire);
+                        auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wait);
+                        if (until_fire_ms < wait_ms) wait = until_fire_ms;
+                    }
+                }
+                db_->wait_update(std::chrono::duration_cast<std::chrono::milliseconds>(wait));
             }
 
-            honker_cpp_lock_release(db_, "honker-scheduler", o.c_str());
+            honker_cpp_lock_release(db_->raw(), "honker-scheduler", o.c_str());
         }
     }
 
-    Scheduler(sqlite3* db) : db_(db) {}
+    Scheduler(Database* db) : db_(db) {}
 
 private:
     std::vector<ScheduledFire> parse_fires(char* rows) {
@@ -734,7 +754,7 @@ private:
         return out;
     }
 
-    sqlite3* db_;
+    Database* db_;
 };
 
 // =====================================================================
@@ -888,7 +908,7 @@ inline Stream Database::stream(std::string_view name) {
 }
 
 inline Scheduler Database::scheduler() {
-    return Scheduler{db_};
+    return Scheduler{this};
 }
 
 inline std::optional<Lock> Database::try_lock(std::string_view name,
@@ -965,9 +985,9 @@ inline bool file_identity(const std::string& path, uint64_t& dev, uint64_t& ino)
 }
 #endif
 
-inline void Database::start_wal_watcher() {
-    if (wal_watcher_active_.exchange(true)) return;
-    wal_watcher_ = std::thread([this]() {
+inline void Database::start_update_watcher() {
+    if (update_watcher_active_.exchange(true)) return;
+    update_watcher_ = std::thread([this]() {
         uint64_t init_dev = 0, init_ino = 0;
         file_identity(path_, init_dev, init_ino);
 
@@ -988,7 +1008,7 @@ inline void Database::start_wal_watcher() {
         query_dv(last_version);
 
         uint64_t tick = 0;
-        while (wal_watcher_active_.load()) {
+        while (update_watcher_active_.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
             // Path 1: PRAGMA data_version (fast path)
@@ -997,18 +1017,18 @@ inline void Database::start_wal_watcher() {
                 if (version != last_version) {
                     last_version = version;
                     {
-                        std::lock_guard<std::mutex> lk(wal_mtx_);
-                        wal_changed_ = true;
+                        std::lock_guard<std::mutex> lk(update_mtx_);
+                        update_changed_ = true;
                     }
-                    wal_cv_.notify_all();
+                    update_cv_.notify_all();
                 }
             } else {
                 // Transient failure — force conservative wake
                 {
-                    std::lock_guard<std::mutex> lk(wal_mtx_);
-                    wal_changed_ = true;
+                    std::lock_guard<std::mutex> lk(update_mtx_);
+                    update_changed_ = true;
                 }
-                wal_cv_.notify_all();
+                update_cv_.notify_all();
             }
 
             // Path 2: stat identity check (dead-man's switch)
@@ -1017,10 +1037,10 @@ inline void Database::start_wal_watcher() {
                 if (!file_identity(path_, dev, ino)) {
                     // File vanished — force wake, let caller recover
                     {
-                        std::lock_guard<std::mutex> lk(wal_mtx_);
-                        wal_changed_ = true;
+                        std::lock_guard<std::mutex> lk(update_mtx_);
+                        update_changed_ = true;
                     }
-                    wal_cv_.notify_all();
+                    update_cv_.notify_all();
                 } else if (dev != init_dev || ino != init_ino) {
                     throw std::runtime_error(
                         "honker: database file replaced (dev=" +
@@ -1034,16 +1054,24 @@ inline void Database::start_wal_watcher() {
     });
 }
 
-inline void Database::stop_wal_watcher() {
-    if (!wal_watcher_active_.exchange(false)) return;
-    wal_cv_.notify_all();
-    if (wal_watcher_.joinable()) wal_watcher_.join();
+inline void Database::stop_update_watcher() {
+    if (!update_watcher_active_.exchange(false)) return;
+    update_cv_.notify_all();
+    if (update_watcher_.joinable()) update_watcher_.join();
 }
 
-inline void Database::wait_wal_change(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lk(wal_mtx_);
-    wal_cv_.wait_for(lk, timeout, [this]() { return wal_changed_ || !wal_watcher_active_.load(); });
-    wal_changed_ = false;
+inline void Database::wait_update(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(update_mtx_);
+    update_cv_.wait_for(lk, timeout, [this]() { return update_changed_ || !update_watcher_active_.load(); });
+    update_changed_ = false;
+}
+
+inline void Database::mark_updated() {
+    {
+        std::lock_guard<std::mutex> lk(update_mtx_);
+        update_changed_ = true;
+    }
+    update_cv_.notify_all();
 }
 
 // =====================================================================

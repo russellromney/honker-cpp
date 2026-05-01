@@ -174,6 +174,77 @@ TEST(scheduler_register_tick) {
     cleanup(db_path);
 }
 
+TEST(scheduler_every_second_expression) {
+    auto db_path = tmp_db();
+    honker::Database db{db_path, ext};
+    auto sched = db.scheduler();
+
+    sched.add("fast", "q", "@every 1s", R"({"task":"x"})");
+    auto soon = sched.soonest();
+    assert(soon > 0);
+
+    auto n = sched.remove("fast");
+    assert(n >= 0);
+    cleanup(db_path);
+}
+
+TEST(scheduler_run_fires_every_second_schedule) {
+    auto db_path = tmp_db();
+    honker::Database db{db_path, ext};
+    auto sched = db.scheduler();
+    auto q = db.queue("fast");
+
+    sched.add("fast-run", "fast", "@every 1s", R"({"ok":true})");
+
+    std::atomic<bool> stop{false};
+    std::thread t([&] { sched.run(stop, "cpp-fast"); });
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    std::optional<honker::Job> job;
+    while (std::chrono::steady_clock::now() < deadline) {
+        job = q.claim_one("worker-fast");
+        if (job.has_value()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    stop = true;
+    t.join();
+
+    assert(job.has_value());
+    assert(job->payload() == R"({"ok":true})");
+    assert(job->ack());
+    cleanup(db_path);
+}
+
+TEST(scheduler_run_wakes_for_new_schedule_registration) {
+    auto db_path = tmp_db();
+    honker::Database db{db_path, ext};
+    auto sched = db.scheduler();
+    auto q = db.queue("wake");
+
+    std::atomic<bool> stop{false};
+    std::thread t([&] { sched.run(stop, "cpp-wake"); });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    sched.add("wake-fast", "wake", "@every 1s", R"({"wake":true})");
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    std::optional<honker::Job> job;
+    while (std::chrono::steady_clock::now() < deadline) {
+        job = q.claim_one("worker-wake");
+        if (job.has_value()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    stop = true;
+    t.join();
+
+    assert(job.has_value());
+    assert(job->payload() == R"({"wake":true})");
+    assert(job->ack());
+    cleanup(db_path);
+}
+
 TEST(lock_mutex) {
     auto db_path = tmp_db();
     honker::Database db{db_path, ext};
@@ -451,6 +522,9 @@ int main() {
     RUN(stream_publish_tx);
     RUN(stream_subscribe);
     RUN(scheduler_register_tick);
+    RUN(scheduler_every_second_expression);
+    RUN(scheduler_run_fires_every_second_schedule);
+    RUN(scheduler_run_wakes_for_new_schedule_registration);
     RUN(lock_mutex);
     RUN(lock_heartbeat);
     RUN(rate_limit);
@@ -468,6 +542,6 @@ int main() {
     RUN(lock_raii_release);
     RUN(result_ttl_expiry);
 
-    std::cout << "ALL OK (24 tests)\n";
+    std::cout << "ALL OK (27 tests)\n";
     return 0;
 }
