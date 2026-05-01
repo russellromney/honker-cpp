@@ -9,7 +9,7 @@ Full docs:
 
 ## Requirements
 
-- Zig 0.16+
+- Zig 0.15+
 - C++17 compiler
 - Honker SQLite extension
 
