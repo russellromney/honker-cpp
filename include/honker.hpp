@@ -645,12 +645,12 @@ private:
 
 class Scheduler {
 public:
-    void add(std::string_view name, std::string_view queue, std::string_view cron_expr,
+    void add(std::string_view name, std::string_view queue, std::string_view schedule_expr,
              std::string_view payload_json, int64_t priority = 0,
              std::optional<int64_t> expires_sec = std::nullopt) {
         const std::string n{name};
         const std::string q{queue};
-        const std::string c{cron_expr};
+        const std::string c{schedule_expr};
         const std::string p{payload_json};
         const auto rc = honker_cpp_scheduler_register(
             db_, n.c_str(), q.c_str(), c.c_str(), p.c_str(), priority,

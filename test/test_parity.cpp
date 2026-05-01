@@ -174,6 +174,20 @@ TEST(scheduler_register_tick) {
     cleanup(db_path);
 }
 
+TEST(scheduler_every_second_expression) {
+    auto db_path = tmp_db();
+    honker::Database db{db_path, ext};
+    auto sched = db.scheduler();
+
+    sched.add("fast", "q", "@every 1s", R"({"task":"x"})");
+    auto soon = sched.soonest();
+    assert(soon > 0);
+
+    auto n = sched.remove("fast");
+    assert(n >= 0);
+    cleanup(db_path);
+}
+
 TEST(lock_mutex) {
     auto db_path = tmp_db();
     honker::Database db{db_path, ext};

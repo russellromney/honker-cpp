@@ -62,7 +62,7 @@ int main() {
 - `Transaction` — `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`; RAII rollback on uncommitted destruction
 - `Queue` — `enqueue`, `enqueue_tx`, `claim_one`, `claim_batch`, `ack`, `ack_batch`, `retry`, `fail`, `heartbeat`, `sweep_expired`
 - `Stream` — `publish`, `publish_tx`, `read_since`, `read_from_consumer`, `save_offset`, `save_offset_tx`, `get_offset`, `subscribe`
-- `Scheduler` — `add`, `remove`, `tick`, `soonest`, `run` (leader-elected with heartbeat)
+- `Scheduler` — `add` with a schedule expression (5-field cron, 6-field cron, or `@every <n><unit>`), `remove`, `tick`, `soonest`, `run` (leader-elected with heartbeat)
 - `Lock` — RAII advisory lock with `release` and `heartbeat`
 - `Subscription` — poll-based listen iterator for `notify` channels
 
