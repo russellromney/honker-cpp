@@ -1,47 +1,20 @@
 # honker-cpp
 
-C++17 binding for [Honker](https://github.com/russellromney/honker): durable queues, streams, pub/sub, and time-trigger scheduling on SQLite.
+This repository is archived.
 
-Full docs:
+Honker's maintained bindings now live in the main Honker repo:
+https://github.com/russellromney/honker/tree/main/packages/honker-cpp
 
-- [Main repo](https://github.com/russellromney/honker)
-- [Docs](https://honker.dev)
+Use that path for source, issues, pull requests, examples, and release work.
 
-## Requirements
+Main repo:
 
-- Zig 0.15+
-- C++17 compiler
-- Honker SQLite extension
+https://github.com/russellromney/honker
 
-## Quick start
+Docs:
 
-```cpp
-#include "honker.hpp"
+https://honker.dev
 
-int main() {
-    honker::Database db{"app.db", "./libhonker_ext.dylib"};
-    auto q = db.queue("emails");
+The C++ binding source now lives in the main repo.
 
-    q.enqueue(R"({"to":"alice@example.com"})");
-
-    if (auto job = q.claim_one("worker-1")) {
-        send_email(job->payload);
-        job->ack();
-    }
-}
-```
-
-Delayed jobs use `run_at` options on enqueue. Recurring schedules use schedule expressions:
-
-```cpp
-auto sched = db.scheduler();
-sched.add("fast", "emails", "@every 1s", R"({"kind":"tick"})");
-```
-
-Supported schedule forms:
-
-- `0 3 * * *`
-- `*/2 * * * * *`
-- `@every 1s`
-
-For full API docs, streams, notify/listen, and SQL details, see the main repo and docs site.
+This repo stays online as a signpost for old links.
